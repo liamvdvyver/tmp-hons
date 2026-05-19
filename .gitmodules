@@ -1,0 +1,3 @@
+[submodule "src/pddlparser-pp"]
+	path = src/pddlparser-pp
+	url = git@github.com:thiagopbueno/pddlparser-pp.git
