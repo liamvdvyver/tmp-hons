@@ -9,11 +9,13 @@
 #include <z3++.h>
 
 #include "strips.h"
+#include "transition.h"
 
 using json = nlohmann::json;
 
-using ActionMap = std::unordered_map<std::string, strips::GroundAction>;
+using Plan = std::vector<std::vector<strips::GroundAction>>;
 
+// Encode the initial state as Boolean facts at time 0.
 void add_init(z3::context &ctx, z3::solver &solver,
               const strips::Domain &domain, const strips::Problem &problem,
               const std::vector<std::string> &objects) {
@@ -32,98 +34,38 @@ void add_init(z3::context &ctx, z3::solver &solver,
   }
 }
 
+// Add the goal condition at a specific time step.
 void add_goal(z3::context &ctx, z3::solver &solver, const strips::Formula &goal,
               int t) {
   solver.add(goal.to_z3(ctx, t));
 }
 
-ActionMap add_transition(z3::context &ctx, z3::solver &solver,
-                         const strips::Domain &domain,
-                         const std::vector<std::string> &objects, int t) {
-  ActionMap action_map;
-  std::vector<strips::GroundAction> grounded_actions;
-
-  for (const auto &action : domain.actions) {
-    for (const auto &arguments :
-         strips::all_params(objects, action.parameters.size())) {
-      strips::GroundAction grounded = strips::ground_action(action, arguments);
-      const std::string action_var_name = grounded.timed_name(t);
-      z3::expr action_var = ctx.bool_const(action_var_name.c_str());
-
-      solver.add(
-          z3::implies(action_var, grounded.precondition.to_z3(ctx, t) &&
-                                      grounded.effect.to_z3(ctx, t + 1)));
-
-      action_map.emplace(action_var_name, grounded);
-      grounded_actions.push_back(std::move(grounded));
-    }
-  }
-
-  for (const auto &predicate : domain.predicates) {
-    for (const auto &arguments : strips::all_params(objects, predicate.arity)) {
-      z3::expr p_t = ctx.bool_const(
-          strips::atom_name(predicate.name, arguments, t).c_str());
-      z3::expr p_tp1 = ctx.bool_const(
-          strips::atom_name(predicate.name, arguments, t + 1).c_str());
-
-      z3::expr_vector explainers(ctx);
-
-      for (const auto &grounded : grounded_actions) {
-        std::vector<std::pair<bool, strips::Atom>> effects;
-        grounded.effect.collect_literals(effects);
-
-        bool affects_atom = false;
-        for (const auto &[_, atom] : effects) {
-          if (atom.name == predicate.name && atom.arguments == arguments) {
-            affects_atom = true;
-            break;
-          }
-        }
-
-        if (affects_atom) {
-          explainers.push_back(ctx.bool_const(grounded.timed_name(t).c_str()));
-        }
-      }
-
-      explainers.push_back(p_tp1 == p_t);
-      solver.add(z3::mk_or(explainers));
-    }
-  }
-
-  std::vector<std::string> keys;
-  keys.reserve(action_map.size());
-  for (const auto &[name, _] : action_map) {
-    keys.push_back(name);
-  }
-
-  z3::expr_vector all(ctx);
-  for (std::size_t i = 0; i < keys.size(); ++i) {
-    z3::expr current = ctx.bool_const(keys[i].c_str());
-    all.push_back(current);
-    z3::expr_vector others(ctx);
-
-    for (std::size_t j = 0; j < keys.size(); ++j) {
-      if (i != j) {
-        others.push_back(ctx.bool_const(keys[j].c_str()));
-      }
-    }
-
-    if (!others.empty()) {
-      solver.add(z3::implies(current, !z3::mk_or(others)));
-    }
-  }
-
-  solver.add(z3::mk_or(all));
-  return action_map;
-}
-
 int main(int argc, char **argv) {
-  if (argc != 2) {
-    std::cerr << "Usage: planner input.json\n";
+  bool partially_ordered = false;
+  bool auto_accept = false;
+  bool json_out = false;
+  std::string input_path;
+
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--partially-ordered" || arg == "-p") {
+      std::cerr << "searching for partially ordered\n";
+      partially_ordered = true;
+    } else if (arg == "-y") {
+      auto_accept = true;
+    } else if (arg == "--json-out" || arg == "-j") {
+      json_out = true;
+    } else {
+      input_path = arg;
+    }
+  }
+
+  if (input_path.empty()) {
+    std::cerr << "Usage: planner [--partially-ordered|-p] [-y] [--json-out|-j] input.json\n";
     return 1;
   }
 
-  std::ifstream file(argv[1]);
+  std::ifstream file(input_path);
   json data;
   file >> data;
 
@@ -135,38 +77,100 @@ int main(int argc, char **argv) {
 
   z3::context ctx;
   z3::solver solver(ctx);
+  TransitionCache transition_cache(domain, objects, partially_ordered);
 
   add_init(ctx, solver, domain, problem, objects);
 
   std::vector<ActionMap> action_maps;
 
+  auto action_to_json = [&](const strips::GroundAction &action) {
+    json action_json;
+    action_json["name"] = domain.actions[action.action_id].name;
+    action_json["arguments"] = json::array();
+    for (strips::ObjectId object_id : action.object_ids) {
+      action_json["arguments"].push_back(objects[object_id]);
+    }
+    return action_json;
+  };
+
+  auto plan_to_json = [&](const Plan &plan) {
+    json plan_json;
+    plan_json["plan"] = json::array();
+    for (const auto &parallel_step : plan) {
+      json step_json = json::array();
+      for (const auto &action : parallel_step) {
+        step_json.push_back(action_to_json(action));
+      }
+      plan_json["plan"].push_back(step_json);
+    }
+    return plan_json;
+  };
+
+  // Read the chosen action variables back out of a satisfying model.
   auto build_plan = [&](const z3::model &model, int h) {
-    std::vector<std::string> plan(h);
+    Plan plan(h);
     for (int t = 0; t < h; ++t) {
       for (const auto &[name, action] : action_maps[t]) {
         z3::expr value = ctx.bool_const(name.c_str());
         if (model.eval(value).bool_value() == Z3_L_TRUE) {
-          plan[t] = action.pretty();
+          plan[t].push_back(action);
         }
       }
     }
     return plan;
   };
 
-  auto print_plan = [](const std::vector<std::string> &plan) {
-    for (const auto &step : plan) {
-      std::cout << '(' << step << ")\n";
+  // Print a candidate plan to stdout.
+  auto print_plan = [&](const Plan &plan) {
+    if (json_out) {
+      std::cout << plan_to_json(plan).dump(2) << '\n';
+      std::cout.flush();
+      return;
+    }
+
+    for (const auto &parallel_step : plan) {
+      for (const auto &action : parallel_step) {
+        std::cout << '(' << action.pretty(domain, objects) << ")\n";
+      }
+      if (parallel_step.size() > 1) {
+        std::cout << "---\n";
+      }
     }
     std::cout.flush();
   };
 
-  auto block_plan = [&](const std::vector<std::string> &plan, int h) {
+  auto write_plan = [&](const Plan &plan) {
+    std::ofstream out("sas_plan");
+    if (json_out) {
+      out << plan_to_json(plan).dump(2) << '\n';
+      return;
+    }
+
+    for (const auto &parallel_step : plan) {
+      for (const auto &action : parallel_step) {
+        out << '(' << action.pretty(domain, objects) << ")\n";
+      }
+      if (parallel_step.size() > 1) {
+        out << "---\n";
+      }
+    }
+  };
+
+  // Exclude exactly the current plan and keep searching at the same horizon.
+  auto block_plan = [&](const Plan &plan, int h) {
     z3::expr_vector disj(ctx);
     for (int t = 0; t < h; ++t) {
       for (const auto &[name, action] : action_maps[t]) {
-        if (action.pretty() == plan[t]) {
+        bool chosen = false;
+        for (const auto &chosen_action : plan[t]) {
+          if (action.action_id == chosen_action.action_id &&
+              action.object_ids == chosen_action.object_ids) {
+            chosen = true;
+            break;
+          }
+        }
+        if (chosen) {
           disj.push_back(!ctx.bool_const(name.c_str()));
-          break;
         }
       }
     }
@@ -175,6 +179,7 @@ int main(int argc, char **argv) {
     }
   };
 
+  // Debug helper: dump the current solver assertions.
   auto print_constraints = [&]() {
     z3::expr_vector assertions = solver.assertions();
     for (unsigned i = 0; i < assertions.size(); ++i) {
@@ -183,23 +188,21 @@ int main(int argc, char **argv) {
     std::cout.flush();
   };
 
-  // Will increment to 0 at start of lopp
+  // Current length bound. We grow it only when the current horizon is unsat.
   int horizon = 0;
   solver.push();
-  solver.add(ctx.bool_val(false));
+  add_goal(ctx, solver, problem.goal, horizon);
 
   while (true) {
 
+    // If there is no plan at the current bound, increase the horizon.
     while (solver.check() != z3::sat) {
-
       solver.pop();
       ++horizon;
       std::cerr << "h:" << horizon;
-      if (horizon) {
-        std::cerr << ", transition";
-        action_maps.push_back(
-            add_transition(ctx, solver, domain, objects, horizon - 1));
-      }
+      std::cerr << ", transition";
+      action_maps.push_back(
+          transition_cache.add_transition(ctx, solver, horizon - 1));
       solver.push();
       std::cerr << ", goal";
       add_goal(ctx, solver, problem.goal, horizon);
@@ -207,11 +210,17 @@ int main(int argc, char **argv) {
     }
 
     z3::model model = solver.get_model();
-    std::vector<std::string> plan = build_plan(model, horizon);
+    Plan plan = build_plan(model, horizon);
     print_plan(plan);
+
+    if (auto_accept) {
+      write_plan(plan);
+      return 0;
+    }
 
     std::string command;
 
+    // Keep offering the same plan until the user accepts it or rejects it.
     while (command != "n") {
       std::cout << horizon << ":y/n/p> ";
       std::cout.flush();
@@ -220,10 +229,7 @@ int main(int argc, char **argv) {
       }
 
       if (command == "y") {
-        std::ofstream out("sas_plan");
-        for (const auto &step : plan) {
-          out << '(' << step << ")\n";
-        }
+        write_plan(plan);
         return 0;
       }
 

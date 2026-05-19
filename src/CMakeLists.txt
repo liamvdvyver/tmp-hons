@@ -23,6 +23,8 @@ add_compile_options(${Z3_COMPONENT_CXX_FLAGS})
 
 add_library(strips_core
     strips.cpp
+    graph.cpp
+    transition.cpp
 )
 
 target_include_directories(strips_core

@@ -17,12 +17,17 @@
     a - block
     b - block
     c - block
+    r1 - arm
   )
   (:init
-    (arm-clear)
+    (arm r1)
+    (block a)
+    (block b)
+    (block c)
+    (arm-clear r1)
     (on-table a) (on-table b)
     (on c a)
     (clear c) (clear b)
   )
-  (:goal (and (arm-clear) (on a b) (on b c) (on-table c)))
+  (:goal (and (arm-clear r1) (on a b) (on b c) (on-table c)))
 )

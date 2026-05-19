@@ -1,6 +1,7 @@
 #include "strips.h"
 
 #include <functional>
+#include <stdexcept>
 
 namespace strips {
 
@@ -44,6 +45,28 @@ std::string action_name(const std::string &action,
   }
   result += ")@" + std::to_string(t);
   return result;
+}
+
+std::string atom_name(const Domain &domain, const std::vector<std::string> &objects,
+                      PredicateId predicate_id,
+                      const std::vector<ObjectId> &object_ids, int t) {
+  std::vector<std::string> arguments;
+  arguments.reserve(object_ids.size());
+  for (ObjectId object_id : object_ids) {
+    arguments.push_back(objects[object_id]);
+  }
+  return atom_name(domain.predicates[predicate_id].name, arguments, t);
+}
+
+std::string action_name(const Domain &domain, const std::vector<std::string> &objects,
+                        ActionId action_id, const std::vector<ObjectId> &object_ids,
+                        int t) {
+  std::vector<std::string> arguments;
+  arguments.reserve(object_ids.size());
+  for (ObjectId object_id : object_ids) {
+    arguments.push_back(objects[object_id]);
+  }
+  return action_name(domain.actions[action_id].name, arguments, t);
 }
 
 Formula Formula::parse(const json &data) {
@@ -189,26 +212,78 @@ std::vector<std::vector<std::string>> all_params(const std::vector<std::string> 
   return result;
 }
 
-GroundAction ground_action(const ActionSchema &action, const std::vector<std::string> &arguments) {
-  std::unordered_map<std::string, std::string> bindings;
-  for (std::size_t i = 0; i < action.parameters.size(); ++i) {
-    bindings[action.parameters[i]] = arguments[i];
+std::vector<std::vector<ObjectId>> all_object_assignments(std::size_t object_count,
+                                                          int arity) {
+  std::vector<std::vector<ObjectId>> result;
+
+  std::function<void(std::vector<ObjectId> &)> generate =
+      [&](std::vector<ObjectId> &current) {
+        if (static_cast<int>(current.size()) == arity) {
+          result.push_back(current);
+          return;
+        }
+        for (ObjectId object_id = 0; object_id < object_count; ++object_id) {
+          current.push_back(object_id);
+          generate(current);
+          current.pop_back();
+        }
+      };
+
+  std::vector<ObjectId> current;
+  generate(current);
+  return result;
+}
+
+GroundAtom ground_atom(const Domain &domain,
+                       const std::unordered_map<std::string, ObjectId> &object_ids,
+                       const Atom &atom) {
+  const auto predicate_it = domain.predicate_ids.find(atom.name);
+  if (predicate_it == domain.predicate_ids.end()) {
+    throw std::runtime_error("unknown predicate: " + atom.name);
   }
 
-  return GroundAction{action.name,
-                      arguments,
-                      action.precondition.substitute(bindings),
+  GroundAtom grounded{predicate_it->second, {}};
+  grounded.object_ids.reserve(atom.arguments.size());
+  for (const auto &argument : atom.arguments) {
+    const auto object_it = object_ids.find(argument);
+    if (object_it == object_ids.end()) {
+      throw std::runtime_error("unknown object: " + argument);
+    }
+    grounded.object_ids.push_back(object_it->second);
+  }
+  return grounded;
+}
+
+GroundLiteral ground_literal(const Domain &domain,
+                             const std::unordered_map<std::string, ObjectId> &object_ids,
+                             bool positive, const Atom &atom) {
+  return GroundLiteral{positive, ground_atom(domain, object_ids, atom)};
+}
+
+GroundAction ground_action(const Domain &domain, ActionId action_id,
+                           const std::vector<std::string> &objects,
+                           const std::vector<ObjectId> &object_ids) {
+  const ActionSchema &action = domain.actions[action_id];
+  std::unordered_map<std::string, std::string> bindings;
+  for (std::size_t i = 0; i < action.parameters.size(); ++i) {
+    bindings[action.parameters[i]] = objects[object_ids[i]];
+  }
+
+  return GroundAction{action_id, object_ids, action.precondition.substitute(bindings),
                       action.effect.substitute(bindings)};
 }
 
-std::string GroundAction::timed_name(int t) const {
-  return action_name(name, arguments, t);
+std::string GroundAction::timed_name(const Domain &domain,
+                                     const std::vector<std::string> &objects,
+                                     int t) const {
+  return action_name(domain, objects, action_id, object_ids, t);
 }
 
-std::string GroundAction::pretty() const {
-  std::string result = name;
-  for (const auto &argument : arguments) {
-    result += " " + argument;
+std::string GroundAction::pretty(const Domain &domain,
+                                 const std::vector<std::string> &objects) const {
+  std::string result = domain.actions[action_id].name;
+  for (ObjectId object_id : object_ids) {
+    result += " " + objects[object_id];
   }
   return result;
 }
@@ -221,10 +296,12 @@ Domain Domain::parse(const json &data) {
   }
 
   for (const auto &[name, parameters] : data["predicates"].items()) {
+    domain.predicate_ids.emplace(name, domain.predicates.size());
     domain.predicates.push_back(PredicateSchema{name, parameters.size()});
   }
 
   for (const auto &[name, action_data] : data["actions"].items()) {
+    domain.action_ids.emplace(name, domain.actions.size());
     domain.actions.push_back(ActionSchema{
         name,
         action_data["terms"].get<std::vector<std::string>>(),
@@ -239,6 +316,9 @@ Domain Domain::parse(const json &data) {
 Problem Problem::parse(const json &data) {
   Problem problem;
   problem.objects = parse_string_array(data["objects"]);
+  for (ObjectId object_id = 0; object_id < problem.objects.size(); ++object_id) {
+    problem.object_ids.emplace(problem.objects[object_id], object_id);
+  }
   problem.goal = Formula::parse(data["goal"]);
 
   for (const auto &atom_data : data["init"]) {

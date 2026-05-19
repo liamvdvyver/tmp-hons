@@ -2,11 +2,14 @@
   (:domain blocksworld)
   (:objects
     a - block
+    r1 - arm
   )
   (:init
-    (arm-clear)
+    (arm r1)
+    (block a)
+    (arm-clear r1)
     (on-table a)
     (clear a)
   )
-  (:goal (and (arm-clear)))
+  (:goal (and (holding r1 a)))
 )

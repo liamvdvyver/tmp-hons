@@ -21,7 +21,9 @@ def main() -> int:
     problem: pddl.core.Problem = pddl.parse_problem(sys.argv[2])
     plan: pddl.core.Plan = pddl.parse_plan(sys.argv[3])
 
-    return 0 if plan.check(domain, problem) else 1
+    # return 0 if plan.check(domain, problem) else 1
+    print(plan.check(domain, problem))
+    return 0
 
 
 if __name__ == "__main__":
