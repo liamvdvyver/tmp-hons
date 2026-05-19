@@ -103,10 +103,17 @@ null
 ```
 or an empty object/array, which is treated as trivially true by the current implementation.
 
-### Atomic formula
+### Atomic predicate formula
 ```json
 {
   "pred": ["predicate_name", ["arg1", "arg2"]]
+}
+```
+
+### Atomic action formula
+```json
+{
+  "action": ["action_name", ["arg1", "arg2"]]
 }
 ```
 
@@ -207,6 +214,32 @@ When JSON output is enabled, the planner prints and writes plans in this format:
   ]
 }
 ```
+
+## Interactive rejection constraints
+
+When the planner is run interactively, after printing a candidate plan it accepts:
+- `y` to accept the plan
+- `n` to reject only the current exact plan
+- `p` to print the current solver assertions
+- a JSON formula to add a more general rejection constraint
+
+The JSON constraint uses the same formula schema as above, with the addition that
+atomic formulas may mention either predicates (`pred`) or actions (`action`).
+The supplied formula is asserted at every time step of the current horizon.
+So, to forbid a failure pattern, the JSON should usually be a negated formula such as:
+
+```json
+{
+  "not": {
+    "and": [
+      { "action": ["pick-from", ["r0", "b0", "b1"]] },
+      { "pred": ["held", ["b0"]] }
+    ]
+  }
+}
+```
+
+Providing such a JSON constraint replaces the default exact-plan blocking for that rejection.
 
 ## Output interpretation
 

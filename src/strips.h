@@ -22,6 +22,11 @@ struct Atom {
   std::vector<std::string> arguments;
 };
 
+struct ActionAtom {
+  std::string name;
+  std::vector<std::string> arguments;
+};
+
 struct GroundAtom {
   PredicateId predicate_id;
   std::vector<ObjectId> object_ids;
@@ -47,7 +52,7 @@ struct Disjunction {
 };
 
 struct Formula {
-  using Node = std::variant<std::monostate, Atom, Negation, Conjunction, Disjunction>;
+  using Node = std::variant<std::monostate, Atom, ActionAtom, Negation, Conjunction, Disjunction>;
 
   Node node;
 

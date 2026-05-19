@@ -19,6 +19,11 @@ Atom parse_atom(const json &data) {
               data["pred"][1].get<std::vector<std::string>>()};
 }
 
+ActionAtom parse_action_atom(const json &data) {
+  return ActionAtom{data["action"][0].get<std::string>(),
+                    data["action"][1].get<std::vector<std::string>>()};
+}
+
 } // namespace
 
 std::string atom_name(const std::string &predicate,
@@ -78,6 +83,10 @@ Formula Formula::parse(const json &data) {
     return Formula{parse_atom(data)};
   }
 
+  if (data.contains("action")) {
+    return Formula{parse_action_atom(data)};
+  }
+
   if (data.contains("not")) {
     return Formula{Negation{std::make_shared<Formula>(parse(data["not"]))}};
   }
@@ -116,6 +125,16 @@ Formula Formula::substitute(const std::unordered_map<std::string, std::string> &
     return Formula{std::move(grounded)};
   }
 
+  if (const auto *action = std::get_if<ActionAtom>(&node)) {
+    ActionAtom grounded = *action;
+    for (auto &argument : grounded.arguments) {
+      if (const auto it = bindings.find(argument); it != bindings.end()) {
+        argument = it->second;
+      }
+    }
+    return Formula{std::move(grounded)};
+  }
+
   if (const auto *negation = std::get_if<Negation>(&node)) {
     return Formula{Negation{std::make_shared<Formula>(negation->operand->substitute(bindings))}};
   }
@@ -142,6 +161,10 @@ z3::expr Formula::to_z3(z3::context &ctx, int t) const {
 
   if (const auto *atom = std::get_if<Atom>(&node)) {
     return ctx.bool_const(atom_name(atom->name, atom->arguments, t).c_str());
+  }
+
+  if (const auto *action = std::get_if<ActionAtom>(&node)) {
+    return ctx.bool_const(action_name(action->name, action->arguments, t).c_str());
   }
 
   if (const auto *negation = std::get_if<Negation>(&node)) {

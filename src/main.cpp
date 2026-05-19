@@ -2,6 +2,7 @@
 #include <iostream>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -40,6 +41,31 @@ void add_init(z3::context &ctx, z3::solver &solver,
 void add_goal(z3::context &ctx, z3::solver &solver, const strips::Formula &goal,
               int t) {
   solver.add(goal.to_z3(ctx, t));
+}
+
+std::optional<json> parse_json_command(const std::string &first_line) {
+  std::string trimmed = first_line;
+  const std::size_t first = trimmed.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos || trimmed[first] != '{') {
+    return std::nullopt;
+  }
+
+  try {
+    return json::parse(trimmed);
+  } catch (const json::parse_error &) {
+  }
+
+  std::string buffer = trimmed;
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    buffer += "\n" + line;
+    try {
+      return json::parse(buffer);
+    } catch (const json::parse_error &) {
+    }
+  }
+
+  throw std::runtime_error("unterminated JSON constraint input");
 }
 
 int main(int argc, char **argv) {
@@ -189,6 +215,12 @@ int main(int argc, char **argv) {
     }
   };
 
+  auto add_general_constraint = [&](const strips::Formula &constraint, int h) {
+    for (int t = 0; t < h; ++t) {
+      solver.add(constraint.to_z3(ctx, t));
+    }
+  };
+
   // Debug helper: dump the current solver assertions.
   auto print_constraints = [&]() {
     z3::expr_vector assertions = solver.assertions();
@@ -236,8 +268,8 @@ int main(int argc, char **argv) {
     std::string command;
 
     // Keep offering the same plan until the user accepts it or rejects it.
-    while (command != "n") {
-      std::cout << horizon << ":y/n/p> ";
+    while (true) {
+      std::cout << horizon << ":y/n/p/json> ";
       std::cout.flush();
       if (!std::getline(std::cin, command)) {
         return 1;
@@ -250,9 +282,27 @@ int main(int argc, char **argv) {
 
       if (command == "p") {
         print_constraints();
+        continue;
       }
-    }
 
-    block_plan(plan, horizon);
+      if (command == "n") {
+        block_plan(plan, horizon);
+        break;
+      }
+
+      try {
+        std::optional<json> command_json = parse_json_command(command);
+        if (command_json.has_value()) {
+          strips::Formula constraint = strips::Formula::parse(*command_json);
+          add_general_constraint(constraint, horizon);
+          break;
+        }
+      } catch (const std::exception &e) {
+        std::cerr << "invalid JSON constraint: " << e.what() << '\n';
+        continue;
+      }
+
+      std::cerr << "expected y, n, p, or a JSON constraint\n";
+    }
   }
 }
