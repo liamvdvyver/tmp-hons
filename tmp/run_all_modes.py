@@ -57,6 +57,7 @@ def run_trial(
     n_arms: int,
     mode: str,
     seed: int,
+    generalize_supported_grab_collisions: bool,
 ) -> tuple[dict, float]:
     command = [
         sys.executable,
@@ -71,6 +72,8 @@ def run_trial(
         "--planner",
         planner,
     ]
+    if generalize_supported_grab_collisions:
+        command.append("--generalize-supported-grab-collisions")
     t0 = time.time()
     proc = subprocess.run(command, check=True, capture_output=True, text=True)
     elapsed = time.time() - t0
@@ -88,6 +91,11 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--planner", default=str(ROOT / "planner"))
     parser.add_argument("--csv", default=str(ROOT / "tmp" / "grid_results.csv"))
+    parser.add_argument(
+        "--generalize-supported-grab-collisions",
+        action="store_true",
+        help="Pass through supported-grab collision generalization to idtmp_blocksworld.py",
+    )
     args = parser.parse_args()
 
     if args.trials <= 0:
@@ -108,6 +116,7 @@ def main() -> int:
         "trial",
         "seed",
         "mode",
+        "generalize_supported_grab_collisions",
         "runtime_seconds",
         "rejected_plans",
         "plan_length",
@@ -139,6 +148,7 @@ def main() -> int:
                                 n_arms,
                                 mode,
                                 seed,
+                                args.generalize_supported_grab_collisions,
                             )
                             accepted_plan = data["accepted_plan"]
                             row = {
@@ -148,6 +158,9 @@ def main() -> int:
                                 "trial": trial,
                                 "seed": seed,
                                 "mode": mode,
+                                "generalize_supported_grab_collisions": int(
+                                    args.generalize_supported_grab_collisions
+                                ),
                                 "runtime_seconds": elapsed,
                                 "rejected_plans": int(data["rejected"]),
                                 "plan_length": plan_length(accepted_plan),
