@@ -38,7 +38,7 @@ def action_to_obj(a: pddl.core.Action) -> tuple[str, any]:
 def main():
     if len(sys.argv) != 3:
         sys.stderr.write(
-            "Usage: python3 translate.py [domain.pddl] [problem.pddl]\n"
+            "Usage: python3 parse.py [domain.pddl] [problem.pddl]\n"
         )
         return 1
 

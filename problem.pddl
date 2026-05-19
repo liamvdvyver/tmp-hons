@@ -1,7 +1,0 @@
-(define (problem Random-6x1)
-    (:domain blocksworld)
-    (:requirements :strips :typing)
-    (:objects B0 B1 B2 B3 B4 B5 - block)
-    (:init (arm-clear) (clear B1) (on B0 B5) (on B1 B4) (on B3 B0) (on B4 B3) (on B5 B2) (on-table B2))
-    (:goal (and (on B5 B4) (on B1 B0) (arm-clear) (on B4 B3) (on B3 B2) (on B2 B1) (on-table B0) (clear B5)))
-)
