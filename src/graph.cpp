@@ -1,5 +1,7 @@
 #include "graph.h"
 
+#include <algorithm>
+#include <functional>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -8,6 +10,7 @@ namespace graph {
 namespace {
 
 using ProducerMap = std::unordered_map<std::string, std::vector<int>>;
+using GoalSet = std::vector<Literal>;
 
 Literal make_literal(bool positive, const strips::GroundAtom &atom) {
   return Literal{positive, atom};
@@ -18,9 +21,10 @@ bool complementary(const Literal &a, const Literal &b) {
          a.atom.object_ids == b.atom.object_ids;
 }
 
-std::vector<Literal> formula_literals(const strips::Domain &domain,
-                                      const std::unordered_map<std::string, strips::ObjectId> &object_ids,
-                                      const strips::Formula &formula) {
+std::vector<Literal> formula_literals(
+    const strips::Domain &domain,
+    const std::unordered_map<std::string, strips::ObjectId> &object_ids,
+    const strips::Formula &formula) {
   std::vector<std::pair<bool, strips::Atom>> raw;
   formula.collect_literals(raw);
 
@@ -140,6 +144,112 @@ ActionInstance make_noop(const Literal &literal) {
   noop.effects.push_back(literal);
   noop.is_noop = true;
   return noop;
+}
+
+void add_unique_literal(GoalSet &goal_set, const Literal &literal) {
+  const std::string key = literal_key(literal);
+  for (const auto &existing : goal_set) {
+    if (literal_key(existing) == key) {
+      return;
+    }
+  }
+  goal_set.push_back(literal);
+}
+
+bool goal_set_consistent(const GoalSet &goal_set, const FactLayer &layer) {
+  for (const auto &literal : goal_set) {
+    if (!layer.literal_set.contains(literal_key(literal))) {
+      return false;
+    }
+  }
+
+  for (std::size_t i = 0; i < goal_set.size(); ++i) {
+    for (std::size_t j = i + 1; j < goal_set.size(); ++j) {
+      if (fact_mutex(layer, goal_set[i], goal_set[j])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+std::string goal_set_key(const GoalSet &goal_set) {
+  std::vector<std::string> keys;
+  keys.reserve(goal_set.size());
+  for (const auto &literal : goal_set) {
+    keys.push_back(literal_key(literal));
+  }
+  std::sort(keys.begin(), keys.end());
+
+  std::string out;
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    if (i) {
+      out += "&&";
+    }
+    out += keys[i];
+  }
+  return out;
+}
+
+std::vector<GoalSet> satisfying_goal_sets(
+    const strips::Domain &domain,
+    const std::unordered_map<std::string, strips::ObjectId> &object_ids,
+    const strips::Formula &formula, const FactLayer &layer) {
+  if (std::holds_alternative<std::monostate>(formula.node)) {
+    return {GoalSet{}};
+  }
+
+  if (const auto *atom = std::get_if<strips::Atom>(&formula.node)) {
+    GoalSet goals{make_literal(true, strips::ground_atom(domain, object_ids, *atom))};
+    return goal_set_consistent(goals, layer) ? std::vector<GoalSet>{goals}
+                                             : std::vector<GoalSet>{};
+  }
+
+  if (const auto *negation = std::get_if<strips::Negation>(&formula.node)) {
+    if (const auto *inner = std::get_if<strips::Atom>(&negation->operand->node)) {
+      GoalSet goals{make_literal(false, strips::ground_atom(domain, object_ids, *inner))};
+      return goal_set_consistent(goals, layer) ? std::vector<GoalSet>{goals}
+                                               : std::vector<GoalSet>{};
+    }
+    return {};
+  }
+
+  if (const auto *conjunction = std::get_if<strips::Conjunction>(&formula.node)) {
+    std::vector<GoalSet> current{GoalSet{}};
+    for (const auto &operand : conjunction->operands) {
+      std::vector<GoalSet> operand_sets =
+          satisfying_goal_sets(domain, object_ids, operand, layer);
+      std::vector<GoalSet> next;
+      for (const auto &lhs : current) {
+        for (const auto &rhs : operand_sets) {
+          GoalSet merged = lhs;
+          for (const auto &literal : rhs) {
+            add_unique_literal(merged, literal);
+          }
+          if (goal_set_consistent(merged, layer)) {
+            next.push_back(std::move(merged));
+          }
+        }
+      }
+      current = std::move(next);
+      if (current.empty()) {
+        break;
+      }
+    }
+    return current;
+  }
+
+  std::vector<GoalSet> out;
+  for (const auto &operand : std::get<strips::Disjunction>(formula.node).operands) {
+    std::vector<GoalSet> operand_sets = satisfying_goal_sets(domain, object_ids, operand, layer);
+    out.insert(out.end(), operand_sets.begin(), operand_sets.end());
+  }
+  return out;
+}
+
+bool action_supports_literal(const ActionInstance &action, const Literal &literal) {
+  return std::any_of(action.effects.begin(), action.effects.end(),
+                     [&](const Literal &effect) { return effect == literal; });
 }
 
 } // namespace
@@ -316,6 +426,12 @@ void PlanningGraph::build_until_fixpoint() {
   }
 }
 
+void PlanningGraph::build_until_goal_or_fixpoint() {
+  while (!leveled_off_ && !goal_reachable(horizon())) {
+    extend();
+  }
+}
+
 int PlanningGraph::horizon() const { return static_cast<int>(action_layers_.size()); }
 
 bool PlanningGraph::leveled_off() const { return leveled_off_; }
@@ -326,7 +442,7 @@ bool PlanningGraph::goal_reachable(int t) const {
   }
 
   const FactLayer &layer = fact_layers_[t];
-  return preconditions_non_mutex(domain_, object_ids_, problem_.goal, layer);
+  return !satisfying_goal_sets(domain_, object_ids_, problem_.goal, layer).empty();
 }
 
 bool PlanningGraph::literals_mutex(const Literal &a, const Literal &b, int t) const {
@@ -343,10 +459,121 @@ bool PlanningGraph::actions_mutex(int t, int i, int j) const {
   return action_layers_[t].mutexes.contains(mutex_key(std::to_string(i), std::to_string(j)));
 }
 
+std::optional<ParallelPlan> PlanningGraph::extract_plan(int t) const {
+  if (t < 0 || t >= static_cast<int>(fact_layers_.size()) || !goal_reachable(t)) {
+    return std::nullopt;
+  }
+
+  std::vector<std::unordered_set<std::string>> failed(static_cast<std::size_t>(t + 1));
+
+  std::function<bool(int, const GoalSet &, ParallelPlan &)> solve_goals;
+  solve_goals = [&](int level, const GoalSet &goals, ParallelPlan &plan) -> bool {
+    const std::string goals_key = goal_set_key(goals);
+    if (failed[level].contains(goals_key)) {
+      return false;
+    }
+
+    if (level == 0) {
+      return goal_set_consistent(goals, fact_layers_[0]);
+    }
+
+    const ActionLayer &actions = action_layers_[level - 1];
+    std::vector<std::vector<int>> supporters(goals.size());
+    for (std::size_t g = 0; g < goals.size(); ++g) {
+      for (int i = 0; i < static_cast<int>(actions.actions.size()); ++i) {
+        if (action_supports_literal(actions.actions[i], goals[g])) {
+          supporters[g].push_back(i);
+        }
+      }
+      if (supporters[g].empty()) {
+        failed[level].insert(goals_key);
+        return false;
+      }
+    }
+
+    std::vector<int> chosen_indices;
+    std::function<bool(std::size_t)> choose_actions;
+    choose_actions = [&](std::size_t goal_index) -> bool {
+      if (goal_index == goals.size()) {
+        GoalSet regressed_goals;
+        for (int action_index : chosen_indices) {
+          for (const auto &precondition : actions.actions[action_index].preconditions) {
+            add_unique_literal(regressed_goals, precondition);
+          }
+        }
+
+        if (!goal_set_consistent(regressed_goals, fact_layers_[level - 1])) {
+          return false;
+        }
+
+        ParallelPlan prefix;
+        if (!solve_goals(level - 1, regressed_goals, prefix)) {
+          return false;
+        }
+
+        std::vector<ActionInstance> step;
+        for (int action_index : chosen_indices) {
+          if (!actions.actions[action_index].is_noop) {
+            step.push_back(actions.actions[action_index]);
+          }
+        }
+        prefix.push_back(std::move(step));
+        plan = std::move(prefix);
+        return true;
+      }
+
+      for (int action_index : supporters[goal_index]) {
+        bool already_chosen = false;
+        for (int existing : chosen_indices) {
+          if (existing == action_index) {
+            already_chosen = true;
+            break;
+          }
+          if (actions_mutex(level - 1, existing, action_index)) {
+            already_chosen = false;
+            goto next_supporter;
+          }
+        }
+
+        if (!already_chosen) {
+          chosen_indices.push_back(action_index);
+        }
+        if (choose_actions(goal_index + 1)) {
+          return true;
+        }
+        if (!already_chosen) {
+          chosen_indices.pop_back();
+        }
+      next_supporter:;
+      }
+      return false;
+    };
+
+    if (choose_actions(0)) {
+      return true;
+    }
+
+    failed[level].insert(goals_key);
+    return false;
+  };
+
+  for (const GoalSet &goal_set : satisfying_goal_sets(domain_, object_ids_, problem_.goal,
+                                                       fact_layers_[t])) {
+    ParallelPlan plan;
+    if (solve_goals(t, goal_set, plan)) {
+      return plan;
+    }
+  }
+
+  return std::nullopt;
+}
+
 const std::vector<FactLayer> &PlanningGraph::fact_layers() const { return fact_layers_; }
 
 const std::vector<ActionLayer> &PlanningGraph::action_layers() const {
   return action_layers_;
 }
+
+const std::vector<std::string> &PlanningGraph::objects() const { return objects_; }
 
 } // namespace graph

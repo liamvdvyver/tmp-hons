@@ -1,6 +1,8 @@
 #pragma once
 
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -11,6 +13,11 @@ namespace graph {
 struct Literal {
   bool positive = true;
   strips::GroundAtom atom;
+
+  bool operator==(const Literal &other) const {
+    return positive == other.positive && atom.predicate_id == other.atom.predicate_id &&
+           atom.object_ids == other.atom.object_ids;
+  }
 };
 
 struct FactLayer {
@@ -35,6 +42,8 @@ struct ActionLayer {
   std::unordered_set<std::string> mutexes;
 };
 
+using ParallelPlan = std::vector<std::vector<ActionInstance>>;
+
 class PlanningGraph {
 public:
   PlanningGraph(const strips::Domain &domain, const strips::Problem &problem);
@@ -42,6 +51,7 @@ public:
   void extend();
   void build_to_length(int n);
   void build_until_fixpoint();
+  void build_until_goal_or_fixpoint();
 
   int horizon() const;
   bool leveled_off() const;
@@ -50,8 +60,11 @@ public:
   bool literals_mutex(const Literal &a, const Literal &b, int t) const;
   bool actions_mutex(int t, int i, int j) const;
 
+  std::optional<ParallelPlan> extract_plan(int t) const;
+
   const std::vector<FactLayer> &fact_layers() const;
   const std::vector<ActionLayer> &action_layers() const;
+  const std::vector<std::string> &objects() const;
 
 private:
   const strips::Domain &domain_;

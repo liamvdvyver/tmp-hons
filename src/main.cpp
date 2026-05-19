@@ -1,5 +1,6 @@
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -8,6 +9,7 @@
 #include <nlohmann/json.hpp>
 #include <z3++.h>
 
+#include "graph.h"
 #include "strips.h"
 #include "transition.h"
 
@@ -42,6 +44,7 @@ void add_goal(z3::context &ctx, z3::solver &solver, const strips::Formula &goal,
 
 int main(int argc, char **argv) {
   bool partially_ordered = false;
+  bool graph_plan = false;
   bool auto_accept = false;
   bool json_out = false;
   std::string input_path;
@@ -51,6 +54,9 @@ int main(int argc, char **argv) {
     if (arg == "--partially-ordered" || arg == "-p") {
       std::cerr << "searching for partially ordered\n";
       partially_ordered = true;
+    } else if (arg == "--graph-plan" || arg == "-g") {
+      std::cerr << "searching with graph-plan mutex propagation\n";
+      graph_plan = true;
     } else if (arg == "-y") {
       auto_accept = true;
     } else if (arg == "--json-out" || arg == "-j") {
@@ -61,7 +67,7 @@ int main(int argc, char **argv) {
   }
 
   if (input_path.empty()) {
-    std::cerr << "Usage: planner [--partially-ordered|-p] [-y] [--json-out|-j] input.json\n";
+    std::cerr << "Usage: planner [--partially-ordered|-p] [--graph-plan|-g] [-y] [--json-out|-j] input.json\n";
     return 1;
   }
 
@@ -78,6 +84,10 @@ int main(int argc, char **argv) {
   z3::context ctx;
   z3::solver solver(ctx);
   TransitionCache transition_cache(domain, objects, partially_ordered);
+  std::optional<graph::PlanningGraph> planning_graph;
+  if (graph_plan) {
+    planning_graph.emplace(domain, problem);
+  }
 
   add_init(ctx, solver, domain, problem, objects);
 
@@ -201,8 +211,13 @@ int main(int argc, char **argv) {
       ++horizon;
       std::cerr << "h:" << horizon;
       std::cerr << ", transition";
+      const graph::ActionLayer *graph_action_layer = nullptr;
+      if (planning_graph.has_value()) {
+        planning_graph->build_to_length(horizon);
+        graph_action_layer = &planning_graph->action_layers()[horizon - 1];
+      }
       action_maps.push_back(
-          transition_cache.add_transition(ctx, solver, horizon - 1));
+          transition_cache.add_transition(ctx, solver, horizon - 1, graph_action_layer));
       solver.push();
       std::cerr << ", goal";
       add_goal(ctx, solver, problem.goal, horizon);

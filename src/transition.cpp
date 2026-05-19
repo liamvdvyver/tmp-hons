@@ -4,6 +4,20 @@
 
 namespace {
 
+std::string untimed_action_key(strips::ActionId action_id,
+                               const std::vector<strips::ObjectId> &object_ids) {
+  return std::to_string(action_id) + ":" + [&]() {
+    std::string key;
+    for (std::size_t i = 0; i < object_ids.size(); ++i) {
+      if (i) {
+        key += ",";
+      }
+      key += std::to_string(object_ids[i]);
+    }
+    return key;
+  }();
+}
+
 std::string untimed_atom_key(const strips::GroundAtom &atom) {
   return std::to_string(atom.predicate_id) + ":" + [&]() {
     std::string key;
@@ -105,9 +119,21 @@ TransitionCache::TransitionCache(const strips::Domain &domain,
   }
 }
 
-ActionMap TransitionCache::add_transition(z3::context &ctx, z3::solver &solver,
-                                          int t) const {
+ActionMap TransitionCache::add_transition(
+    z3::context &ctx, z3::solver &solver, int t,
+    const graph::ActionLayer *graph_action_layer) const {
   ActionMap action_map;
+  std::unordered_map<std::string, std::size_t> graph_action_indices;
+
+  if (graph_action_layer != nullptr) {
+    for (std::size_t i = 0; i < graph_action_layer->actions.size(); ++i) {
+      const auto &action = graph_action_layer->actions[i];
+      if (!action.is_noop) {
+        graph_action_indices.emplace(
+            untimed_action_key(action.action_id, action.object_ids), i);
+      }
+    }
+  }
 
   for (const auto &entry : actions_) {
     const std::string action_var_name = entry.action.timed_name(domain_, objects_, t);
@@ -116,6 +142,12 @@ ActionMap TransitionCache::add_transition(z3::context &ctx, z3::solver &solver,
     solver.add(z3::implies(action_var,
                            entry.action.precondition.to_z3(ctx, t) &&
                                entry.action.effect.to_z3(ctx, t + 1)));
+
+    if (graph_action_layer != nullptr &&
+        !graph_action_indices.contains(
+            untimed_action_key(entry.action.action_id, entry.action.object_ids))) {
+      solver.add(!action_var);
+    }
 
     action_map.emplace(action_var_name, entry.action);
   }
@@ -142,7 +174,31 @@ ActionMap TransitionCache::add_transition(z3::context &ctx, z3::solver &solver,
     all.push_back(ctx.bool_const(entry.action.timed_name(domain_, objects_, t).c_str()));
   }
 
-  if (partially_ordered_) {
+  if (graph_action_layer != nullptr) {
+    for (std::size_t i = 0; i < actions_.size(); ++i) {
+      const auto it_i = graph_action_indices.find(
+          untimed_action_key(actions_[i].action.action_id, actions_[i].action.object_ids));
+      if (it_i == graph_action_indices.end()) {
+        continue;
+      }
+
+      const z3::expr current =
+          ctx.bool_const(actions_[i].action.timed_name(domain_, objects_, t).c_str());
+      for (std::size_t j = i + 1; j < actions_.size(); ++j) {
+        const auto it_j = graph_action_indices.find(
+            untimed_action_key(actions_[j].action.action_id, actions_[j].action.object_ids));
+        if (it_j == graph_action_indices.end()) {
+          continue;
+        }
+        if (graph_action_layer->mutexes.contains(
+                graph::mutex_key(std::to_string(it_i->second), std::to_string(it_j->second)))) {
+          solver.add(z3::implies(
+              current, !ctx.bool_const(
+                           actions_[j].action.timed_name(domain_, objects_, t).c_str())));
+        }
+      }
+    }
+  } else if (partially_ordered_) {
     for (std::size_t i = 0; i < actions_.size(); ++i) {
       const z3::expr current =
           ctx.bool_const(actions_[i].action.timed_name(domain_, objects_, t).c_str());

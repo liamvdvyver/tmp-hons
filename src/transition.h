@@ -6,6 +6,7 @@
 
 #include <z3++.h>
 
+#include "graph.h"
 #include "strips.h"
 
 using ActionMap = std::unordered_map<std::string, strips::GroundAction>;
@@ -27,7 +28,9 @@ public:
                   const std::vector<std::string> &objects,
                   bool partially_ordered);
 
-  ActionMap add_transition(z3::context &ctx, z3::solver &solver, int t) const;
+  ActionMap add_transition(
+      z3::context &ctx, z3::solver &solver, int t,
+      const graph::ActionLayer *graph_action_layer = nullptr) const;
 
 private:
   const strips::Domain &domain_;
