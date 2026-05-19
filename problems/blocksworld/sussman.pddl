@@ -1,28 +1,28 @@
-;; The classic Sussman anomaly:
+;; the classic sussman anomaly:
 ;;
 ;; initial state:
-;;  C
-;;  A B
+;;  c
+;;  a b
 ;; -----
 ;;
 ;; goal:
-;;  A
-;;  B
-;;  C
+;;  a
+;;  b
+;;  c
 ;; ---
 
 (define (problem sussman)
   (:domain blocksworld)
   (:objects
-    A - block
-    B - block
-    C - block
+    a - block
+    b - block
+    c - block
   )
   (:init
     (arm-clear)
-    (on-table A) (on-table B)
-    (on C A)
-    (clear C) (clear B)
+    (on-table a) (on-table b)
+    (on c a)
+    (clear c) (clear b)
   )
-  (:goal (and (arm-clear) (on A B) (on B C) (on-table C)))
+  (:goal (and (arm-clear) (on a b) (on b c) (on-table c)))
 )

@@ -29,7 +29,7 @@
     devShells = forAllSystems (
       system: let
         pkgs = nixpkgs.legacyPackages.${system};
-        stdenv = pkgs.stdenv;
+        stdenv = pkgs.clangStdenv;
         python = pkgs.python3.override {
           self = python;
           packageOverrides = pyfinal: pyprev: {
@@ -43,10 +43,16 @@
               p.pybullet
               p.pddl
               p.z3-solver
+              p.matplotlib
             ]))
             pkgs.fast-downward
             pkgs.pyright
             pkgs.black
+            pkgs.cmake
+            pkgs.clang
+            pkgs.bisoncpp
+            pkgs.bison
+            pkgs.z3
           ];
         };
       }

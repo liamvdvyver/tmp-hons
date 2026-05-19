@@ -198,6 +198,30 @@ main.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/main.cpp.s
 .PHONY : main.cpp.s
 
+strips.o: strips.cpp.o
+.PHONY : strips.o
+
+# target to build an object file
+strips.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/strips.cpp.o
+.PHONY : strips.cpp.o
+
+strips.i: strips.cpp.i
+.PHONY : strips.i
+
+# target to preprocess a source file
+strips.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/strips.cpp.i
+.PHONY : strips.cpp.i
+
+strips.s: strips.cpp.s
+.PHONY : strips.s
+
+# target to generate assembly for a file
+strips.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/main.dir/build.make CMakeFiles/main.dir/strips.cpp.s
+.PHONY : strips.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -214,6 +238,9 @@ help:
 	@echo "... main.o"
 	@echo "... main.i"
 	@echo "... main.s"
+	@echo "... strips.o"
+	@echo "... strips.i"
+	@echo "... strips.s"
 .PHONY : help
 
 
