@@ -221,9 +221,13 @@ When the planner is run interactively, after printing a candidate plan it accept
 - `y` to accept the plan
 - `n` to reject only the current exact plan
 - `p` to print the current solver assertions
-- a JSON formula to add a more general rejection constraint
+- a JSON rejection constraint
 
-The JSON constraint uses the same formula schema as above, with the addition that
+A rejection constraint may be either:
+
+### 1. A general formula
+
+This uses the same formula schema as above, with the addition that
 atomic formulas may mention either predicates (`pred`) or actions (`action`).
 The supplied formula is asserted at every time step of the current horizon.
 So, to forbid a failure pattern, the JSON should usually be a negated formula such as:
@@ -239,7 +243,32 @@ So, to forbid a failure pattern, the JSON should usually be a negated formula su
 }
 ```
 
-Providing such a JSON constraint replaces the default exact-plan blocking for that rejection.
+### 2. An action mutex
+
+This directly forbids two grounded actions from appearing together in the same time step:
+
+```json
+{
+  "mutex": [
+    {
+      "name": "place-on",
+      "arguments": ["r0", "b0", "b1"]
+    },
+    {
+      "name": "pick-from",
+      "arguments": ["r1", "b1", "b2"]
+    }
+  ]
+}
+```
+
+When graph-plan mode is enabled, the planner rebuilds an incremental planning graph for the
+current horizon using the union of the base graph mutexes and the supplied mutexes, and then
+propagates the resulting mutexes forward through later layers. Like other interactive rejection
+constraints, these mutexes live only for the current horizon; when the search moves to the next
+horizon, planning resumes from the base graph.
+
+Providing a JSON rejection constraint replaces the default exact-plan blocking for that rejection.
 
 ## Output interpretation
 

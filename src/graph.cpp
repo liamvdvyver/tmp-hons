@@ -272,6 +272,27 @@ std::string mutex_key(const std::string &a, const std::string &b) {
   return a < b ? a + "||" + b : b + "||" + a;
 }
 
+std::string action_key(strips::ActionId action_id,
+                       const std::vector<strips::ObjectId> &object_ids) {
+  return std::to_string(action_id) + ":" + [&]() {
+    std::string s;
+    for (std::size_t i = 0; i < object_ids.size(); ++i) {
+      if (i) {
+        s += ",";
+      }
+      s += std::to_string(object_ids[i]);
+    }
+    return s;
+  }();
+}
+
+std::string action_key(const ActionInstance &action) {
+  if (action.is_noop) {
+    return "noop:" + literal_key(action.effects.front());
+  }
+  return action_key(action.action_id, action.object_ids);
+}
+
 std::string ActionInstance::pretty(const strips::Domain &domain,
                                    const std::vector<std::string> &objects) const {
   if (is_noop) {
@@ -359,6 +380,118 @@ void PlanningGraph::extend() {
       const auto &b = action_layer.actions[j];
       if (inconsistent_effects(a, b) || interference(a, b) ||
           competing_needs(a, b, facts)) {
+        action_layer.mutexes.insert(mutex_key(std::to_string(i), std::to_string(j)));
+      }
+    }
+  }
+
+  FactLayer next;
+  ProducerMap producers;
+  for (int i = 0; i < static_cast<int>(action_layer.actions.size()); ++i) {
+    for (const auto &effect : action_layer.actions[i].effects) {
+      const std::string key = literal_key(effect);
+      if (!next.literal_set.contains(key)) {
+        next.literal_set.insert(key);
+        next.literals.push_back(effect);
+      }
+      producers[key].push_back(i);
+    }
+  }
+
+  for (std::size_t i = 0; i < next.literals.size(); ++i) {
+    for (std::size_t j = i + 1; j < next.literals.size(); ++j) {
+      const auto &a = next.literals[i];
+      const auto &b = next.literals[j];
+      const std::string key_a = literal_key(a);
+      const std::string key_b = literal_key(b);
+
+      if (complementary(a, b)) {
+        next.mutexes.insert(mutex_key(key_a, key_b));
+        continue;
+      }
+
+      bool supported_by_non_mutex = false;
+      for (int producer_a : producers[key_a]) {
+        for (int producer_b : producers[key_b]) {
+          if (!action_layer.mutexes.contains(
+                  mutex_key(std::to_string(producer_a), std::to_string(producer_b)))) {
+            supported_by_non_mutex = true;
+            break;
+          }
+        }
+        if (supported_by_non_mutex) {
+          break;
+        }
+      }
+
+      if (!supported_by_non_mutex) {
+        next.mutexes.insert(mutex_key(key_a, key_b));
+      }
+    }
+  }
+
+  leveled_off_ = next.literal_set == facts.literal_set && next.mutexes == facts.mutexes;
+  action_layers_.push_back(std::move(action_layer));
+  fact_layers_.push_back(std::move(next));
+}
+
+IncrementalPlanningGraph::IncrementalPlanningGraph(
+    const PlanningGraph &base_graph,
+    std::unordered_set<std::string> additional_action_mutexes)
+    : PlanningGraph(base_graph.domain(), base_graph.problem()),
+      base_graph_(base_graph),
+      additional_action_mutexes_(std::move(additional_action_mutexes)) {}
+
+void IncrementalPlanningGraph::extend() {
+  const int level = horizon();
+  const FactLayer &facts = fact_layers_.back();
+
+  std::unordered_set<std::string> base_action_mutexes;
+  if (level < static_cast<int>(base_graph_.action_layers().size())) {
+    const ActionLayer &base_action_layer = base_graph_.action_layers()[level];
+    for (std::size_t i = 0; i < base_action_layer.actions.size(); ++i) {
+      for (std::size_t j = i + 1; j < base_action_layer.actions.size(); ++j) {
+        if (base_action_layer.mutexes.contains(
+                mutex_key(std::to_string(i), std::to_string(j)))) {
+          base_action_mutexes.insert(mutex_key(
+              action_key(base_action_layer.actions[i]),
+              action_key(base_action_layer.actions[j])));
+        }
+      }
+    }
+  }
+
+  ActionLayer action_layer;
+  for (const auto &literal : facts.literals) {
+    action_layer.actions.push_back(make_noop(literal));
+  }
+
+  for (strips::ActionId action_id = 0; action_id < domain_.actions.size(); ++action_id) {
+    const auto &action = domain_.actions[action_id];
+    for (const auto &assignment : strips::all_object_assignments(objects_.size(), action.parameters.size())) {
+      strips::GroundAction grounded =
+          strips::ground_action(domain_, action_id, objects_, assignment);
+      if (!preconditions_non_mutex(domain_, object_ids_, grounded.precondition, facts)) {
+        continue;
+      }
+
+      ActionInstance instance;
+      instance.action_id = action_id;
+      instance.object_ids = assignment;
+      instance.preconditions = formula_literals(domain_, object_ids_, grounded.precondition);
+      instance.effects = formula_literals(domain_, object_ids_, grounded.effect);
+      action_layer.actions.push_back(std::move(instance));
+    }
+  }
+
+  for (std::size_t i = 0; i < action_layer.actions.size(); ++i) {
+    for (std::size_t j = i + 1; j < action_layer.actions.size(); ++j) {
+      const auto &a = action_layer.actions[i];
+      const auto &b = action_layer.actions[j];
+      if (inconsistent_effects(a, b) || interference(a, b) ||
+          competing_needs(a, b, facts) ||
+          base_action_mutexes.contains(mutex_key(action_key(a), action_key(b))) ||
+          additional_action_mutexes_.contains(mutex_key(action_key(a), action_key(b)))) {
         action_layer.mutexes.insert(mutex_key(std::to_string(i), std::to_string(j)));
       }
     }
@@ -575,5 +708,9 @@ const std::vector<ActionLayer> &PlanningGraph::action_layers() const {
 }
 
 const std::vector<std::string> &PlanningGraph::objects() const { return objects_; }
+
+const strips::Domain &PlanningGraph::domain() const { return domain_; }
+
+const strips::Problem &PlanningGraph::problem() const { return problem_; }
 
 } // namespace graph

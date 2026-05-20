@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -118,6 +119,7 @@ int main(int argc, char **argv) {
   add_init(ctx, solver, domain, problem, objects);
 
   std::vector<ActionMap> action_maps;
+  std::unordered_set<std::string> current_graph_mutexes;
 
   auto action_to_json = [&](const strips::GroundAction &action) {
     json action_json;
@@ -140,6 +142,88 @@ int main(int argc, char **argv) {
       plan_json["plan"].push_back(step_json);
     }
     return plan_json;
+  };
+
+  auto parse_ground_action_json = [&](const json &action_json) {
+    const std::string name = action_json.at("name").get<std::string>();
+    const auto action_it = domain.action_ids.find(name);
+    if (action_it == domain.action_ids.end()) {
+      throw std::runtime_error("unknown action in mutex constraint: " + name);
+    }
+
+    const std::vector<std::string> arguments =
+        action_json.at("arguments").get<std::vector<std::string>>();
+    std::vector<strips::ObjectId> object_ids;
+    object_ids.reserve(arguments.size());
+    for (const auto &argument : arguments) {
+      const auto object_it = std::find(objects.begin(), objects.end(), argument);
+      if (object_it == objects.end()) {
+        throw std::runtime_error("unknown object in mutex constraint: " + argument);
+      }
+      object_ids.push_back(
+          static_cast<strips::ObjectId>(std::distance(objects.begin(), object_it)));
+    }
+
+    return strips::ground_action(domain, action_it->second, objects, object_ids);
+  };
+
+  auto action_atom_json = [&](const strips::GroundAction &action) {
+    json arguments = json::array();
+    for (strips::ObjectId object_id : action.object_ids) {
+      arguments.push_back(objects[object_id]);
+    }
+    return json{{"action", json::array({domain.actions[action.action_id].name, arguments})}};
+  };
+
+  auto mutex_formula_from_actions = [&](const strips::GroundAction &a,
+                                       const strips::GroundAction &b) {
+    return strips::Formula::parse(json{{"not",
+                                        json{{"and", json::array({action_atom_json(a),
+                                                                    action_atom_json(b)})}}}});
+  };
+
+  auto add_graph_constraints = [&](const graph::PlanningGraph &planning_graph_for_scope,
+                                   int h) {
+    for (int t = 0; t < h; ++t) {
+      const auto &graph_action_layer = planning_graph_for_scope.action_layers()[t];
+      std::unordered_map<std::string, std::size_t> graph_action_indices;
+      for (std::size_t i = 0; i < graph_action_layer.actions.size(); ++i) {
+        const auto &action = graph_action_layer.actions[i];
+        if (!action.is_noop) {
+          graph_action_indices.emplace(graph::action_key(action.action_id, action.object_ids), i);
+        }
+      }
+
+      for (const auto &[name, action] : action_maps[t]) {
+        if (!graph_action_indices.contains(graph::action_key(action.action_id, action.object_ids))) {
+          solver.add(!ctx.bool_const(name.c_str()));
+        }
+      }
+
+      for (const auto &[name_i, action_i] : action_maps[t]) {
+        const auto it_i = graph_action_indices.find(
+            graph::action_key(action_i.action_id, action_i.object_ids));
+        if (it_i == graph_action_indices.end()) {
+          continue;
+        }
+
+        const z3::expr current = ctx.bool_const(name_i.c_str());
+        for (const auto &[name_j, action_j] : action_maps[t]) {
+          if (name_i >= name_j) {
+            continue;
+          }
+          const auto it_j = graph_action_indices.find(
+              graph::action_key(action_j.action_id, action_j.object_ids));
+          if (it_j == graph_action_indices.end()) {
+            continue;
+          }
+          if (graph_action_layer.mutexes.contains(graph::mutex_key(
+                  std::to_string(it_i->second), std::to_string(it_j->second)))) {
+            solver.add(z3::implies(current, !ctx.bool_const(name_j.c_str())));
+          }
+        }
+      }
+    }
   };
 
   // Read the chosen action variables back out of a satisfying model.
@@ -240,6 +324,7 @@ int main(int argc, char **argv) {
     // If there is no plan at the current bound, increase the horizon.
     while (solver.check() != z3::sat) {
       solver.pop();
+      current_graph_mutexes.clear();
       ++horizon;
       std::cerr << "h:" << horizon;
       std::cerr << ", transition";
@@ -293,6 +378,30 @@ int main(int argc, char **argv) {
       try {
         std::optional<json> command_json = parse_json_command(command);
         if (command_json.has_value()) {
+          if (command_json->contains("mutex")) {
+            const json &mutex_json = command_json->at("mutex");
+            if (!mutex_json.is_array() || mutex_json.size() != 2) {
+              throw std::runtime_error("mutex constraint must contain exactly two actions");
+            }
+
+            const strips::GroundAction first = parse_ground_action_json(mutex_json[0]);
+            const strips::GroundAction second = parse_ground_action_json(mutex_json[1]);
+            const std::string mutex = graph::mutex_key(
+                graph::action_key(first.action_id, first.object_ids),
+                graph::action_key(second.action_id, second.object_ids));
+
+            if (graph_plan && planning_graph.has_value()) {
+              current_graph_mutexes.insert(mutex);
+              graph::IncrementalPlanningGraph incremental_graph(*planning_graph,
+                                                                current_graph_mutexes);
+              incremental_graph.build_to_length(horizon);
+              add_graph_constraints(incremental_graph, horizon);
+            } else {
+              add_general_constraint(mutex_formula_from_actions(first, second), horizon);
+            }
+            break;
+          }
+
           strips::Formula constraint = strips::Formula::parse(*command_json);
           add_general_constraint(constraint, horizon);
           break;

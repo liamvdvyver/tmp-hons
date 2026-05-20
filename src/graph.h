@@ -47,8 +47,9 @@ using ParallelPlan = std::vector<std::vector<ActionInstance>>;
 class PlanningGraph {
 public:
   PlanningGraph(const strips::Domain &domain, const strips::Problem &problem);
+  virtual ~PlanningGraph() = default;
 
-  void extend();
+  virtual void extend();
   void build_to_length(int n);
   void build_until_fixpoint();
   void build_until_goal_or_fixpoint();
@@ -65,8 +66,10 @@ public:
   const std::vector<FactLayer> &fact_layers() const;
   const std::vector<ActionLayer> &action_layers() const;
   const std::vector<std::string> &objects() const;
+  const strips::Domain &domain() const;
+  const strips::Problem &problem() const;
 
-private:
+protected:
   const strips::Domain &domain_;
   const strips::Problem &problem_;
   std::vector<std::string> objects_;
@@ -76,7 +79,22 @@ private:
   bool leveled_off_ = false;
 };
 
+class IncrementalPlanningGraph : public PlanningGraph {
+public:
+  IncrementalPlanningGraph(const PlanningGraph &base_graph,
+                           std::unordered_set<std::string> additional_action_mutexes);
+
+  void extend() override;
+
+private:
+  const PlanningGraph &base_graph_;
+  std::unordered_set<std::string> additional_action_mutexes_;
+};
+
 std::string literal_key(const Literal &literal);
 std::string mutex_key(const std::string &a, const std::string &b);
+std::string action_key(strips::ActionId action_id,
+                       const std::vector<strips::ObjectId> &object_ids);
+std::string action_key(const ActionInstance &action);
 
 } // namespace graph
